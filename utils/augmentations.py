@@ -133,12 +133,25 @@ def letterbox(im, new_shape=(640, 640), color=(114, 114, 114), auto=True, scaleF
     dw /= 2  # divide padding into 2 sides
     dh /= 2
 
+    # Use torchvision transforms to have parity with production
+    im = torch.from_numpy(im.transpose(2, 0, 1))
     if shape[::-1] != new_unpad:  # resize
-        im = cv2.resize(im, new_unpad, interpolation=cv2.INTER_LINEAR)
+        im = TF.resize(
+            img=im,
+            size=[new_unpad[1], new_unpad[0]],
+            interpolation=TF.InterpolationMode.BILINEAR,
+        )
     top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
     left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
-    im = cv2.copyMakeBorder(im, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)  # add border
-    return im, ratio, (dw, dh)
+    im = TF.pad(
+        img=im,
+        padding=[
+            left, top, right, bottom,
+        ],
+        fill=114,
+        padding_mode="constant",
+    )   # add border
+    return im.numpy().transpose(1, 2, 0), ratio, (dw, dh)
 
 
 def random_perspective(im,
@@ -368,7 +381,13 @@ class LetterBox:
         hs, ws = (math.ceil(x / self.stride) * self.stride for x in (h, w)) if self.auto else self.h, self.w
         top, left = round((hs - h) / 2 - 0.1), round((ws - w) / 2 - 0.1)
         im_out = np.full((self.h, self.w, 3), 114, dtype=im.dtype)
-        im_out[top:top + h, left:left + w] = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
+        # Use torchvision transforms to have parity with production
+        resized_im = TF.resize(
+            img=im,
+            size=[h, w],
+            interpolation=TF.InterpolationMode.BILINEAR,
+        )
+        im_out[top:top + h, left:left + w] = resized_im.numpy().transpose(1, 2, 0)
         return im_out
 
 
@@ -382,7 +401,14 @@ class CenterCrop:
         imh, imw = im.shape[:2]
         m = min(imh, imw)  # min dimension
         top, left = (imh - m) // 2, (imw - m) // 2
-        return cv2.resize(im[top:top + m, left:left + m], (self.w, self.h), interpolation=cv2.INTER_LINEAR)
+        # Use torchvision transforms to have parity with production
+        cropped_im = torch.from_numpy(im[top:top + m, left:left + m].transpose(2, 0, 1))
+        resized_im = TF.resize(
+            img=cropped_im,
+            size=[self.h, self.w],
+            interpolation=TF.InterpolationMode.BILINEAR,
+        )
+        return resized_im.numpy().transpose(1, 2, 0)
 
 
 class ToTensor:
