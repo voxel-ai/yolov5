@@ -145,13 +145,12 @@ def export_onnx(model, im, file, opset, dynamic, simplify, prefix=colorstr('ONNX
             dynamic['output1'] = {0: 'batch', 2: 'mask_height', 3: 'mask_width'}  # shape(1,32,160,160)
         elif isinstance(model, DetectionModel):
             dynamic['output0'] = {0: 'batch', 1: 'anchors'}  # shape(1,25200,85)
-
     with torch.no_grad():
         torch.onnx.export(
-            model,
-            im,
+            model.cpu(),
+            im.cpu(),
             f,
-            verbose=False,
+            verbose=True,
             opset_version=opset,
             do_constant_folding=True,
             input_names=['images'],
@@ -163,10 +162,10 @@ def export_onnx(model, im, file, opset, dynamic, simplify, prefix=colorstr('ONNX
         onnx.checker.check_model(model_onnx)  # check onnx model
 
         # Metadata
-        d = {'stride': int(max(model.stride)), 'names': model.names}
-        for k, v in d.items():
-            meta = model_onnx.metadata_props.add()
-            meta.key, meta.value = k, str(v)
+        # d = {'stride': int(max(model.stride)), 'names': model.names}
+        # for k, v in d.items():
+        #     meta = model_onnx.metadata_props.add()
+        #     meta.key, meta.value = k, str(v)
         onnx.save(model_onnx, f)
 
     # Simplify
@@ -243,12 +242,7 @@ def export_engine(model, im, file, half, dynamic, simplify, workspace=4, verbose
     # YOLOv5 TensorRT export https://developer.nvidia.com/tensorrt
     dynamic = True
     assert im.device.type != 'cpu', 'export running on CPU but must be on GPU, i.e. `python export.py --device 0`'
-    try:
-        import tensorrt as trt
-    except Exception:
-        if platform.system() == 'Linux':
-            check_requirements('nvidia-tensorrt', cmds='-U --index-url https://pypi.ngc.nvidia.com')
-        import tensorrt as trt
+    import tensorrt as trt
 
     if trt.__version__[0] == '7':  # TensorRT 7 handling https://github.com/ultralytics/yolov5/issues/6012
         grid = model.model[-1].anchor_grid
@@ -263,13 +257,12 @@ def export_engine(model, im, file, half, dynamic, simplify, workspace=4, verbose
     LOGGER.info(f'\n{prefix} starting export with TensorRT {trt.__version__}...')
     assert onnx.exists(), f'failed to export ONNX file: {onnx}'
     f = file.with_suffix('.engine')  # TensorRT engine file
-    logger = trt.Logger(trt.Logger.INFO)
+    logger = trt.Logger(trt.Logger.VERBOSE)
     if verbose:
         logger.min_severity = trt.Logger.Severity.VERBOSE
 
     builder = trt.Builder(logger)
     config = builder.create_builder_config()
-    config.max_workspace_size = workspace * 1 << 30
     # config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace << 30)  # fix TRT 8.4 deprecation notice
 
     flag = (1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
@@ -296,8 +289,8 @@ def export_engine(model, im, file, half, dynamic, simplify, workspace=4, verbose
     LOGGER.info(f'{prefix} building FP{16 if builder.platform_has_fast_fp16 and half else 32} engine as {f}')
     if builder.platform_has_fast_fp16 and half:
         config.set_flag(trt.BuilderFlag.FP16)
-    with builder.build_engine(network, config) as engine, open(f, 'wb') as t:
-        t.write(engine.serialize())
+    with builder.build_serialized_network(network, config) as engine, open(f, 'wb') as t:
+        t.write(engine)
     return f, None
 
 
@@ -493,7 +486,8 @@ def run(
     if half:
         assert device.type != 'cpu' or coreml, '--half only compatible with GPU export, i.e. use --device 0'
         assert not dynamic, '--half not compatible with --dynamic, i.e. use either --half or --dynamic but not both'
-    model = attempt_load(weights, device=device, inplace=True, fuse=True)  # load FP32 model
+    model = attempt_load(weights, device="cpu", inplace=True, fuse=True)  # load FP32 model
+    model.to(device)
 
     # Checks
     imgsz *= 2 if len(imgsz) == 1 else 1  # expand
@@ -513,14 +507,15 @@ def run(
             m.dynamic = dynamic
             m.export = True
 
-    for _ in range(2):
-        y = model(im)  # dry runs
-    if half and not coreml:
-        im, model = im.half(), model.half()  # to FP16
-    shape = tuple((y[0] if isinstance(y, tuple) else y).shape)  # model output shape
-    metadata = {'stride': int(max(model.stride)), 'names': model.names}  # model metadata
-    LOGGER.info(f"\n{colorstr('PyTorch:')} starting from {file} with output shape {shape} ({file_size(file):.1f} MB)")
+    # for _ in range(2):
+    #     y = model(im)  # dry runs
 
+    # if half and not coreml:
+    #     im, model = im.half(), model.half()  # to FP16
+
+    # shape = tuple((y[0] if isinstance(y, tuple) else y).shape)  # model output shape
+    # metadata = {'stride': int(max(model.stride)), 'names': model.names}  # model metadata
+    # LOGGER.info(f"\n{colorstr('PyTorch:')} starting from {file} with output shape {shape} ({file_size(file):.1f} MB)")
     # Exports
     f = [''] * len(fmts)  # exported filenames
     warnings.filterwarnings(action='ignore', category=torch.jit.TracerWarning)  # suppress TracerWarning
