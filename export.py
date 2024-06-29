@@ -257,7 +257,7 @@ def export_engine(model, im, file, half, dynamic, simplify, workspace=4, verbose
     LOGGER.info(f'\n{prefix} starting export with TensorRT {trt.__version__}...')
     assert onnx.exists(), f'failed to export ONNX file: {onnx}'
     f = file.with_suffix('.engine')  # TensorRT engine file
-    logger = trt.Logger(trt.Logger.VERBOSE)
+    logger = trt.Logger(trt.Logger.INFO)
     if verbose:
         logger.min_severity = trt.Logger.Severity.VERBOSE
 
@@ -287,8 +287,8 @@ def export_engine(model, im, file, half, dynamic, simplify, workspace=4, verbose
         config.add_optimization_profile(profile)
 
     LOGGER.info(f'{prefix} building FP{16 if builder.platform_has_fast_fp16 and half else 32} engine as {f}')
-    if builder.platform_has_fast_fp16 and half:
-        config.set_flag(trt.BuilderFlag.FP16)
+    # if builder.platform_has_fast_fp16 and half:
+    config.set_flag(trt.BuilderFlag.FP16)
     with builder.build_serialized_network(network, config) as engine, open(f, 'wb') as t:
         t.write(engine)
     return f, None
@@ -510,8 +510,8 @@ def run(
     # for _ in range(2):
     #     y = model(im)  # dry runs
 
-    # if half and not coreml:
-    #     im, model = im.half(), model.half()  # to FP16
+    if half and not coreml:
+        im, model = im.half(), model.half()  # to FP16
 
     # shape = tuple((y[0] if isinstance(y, tuple) else y).shape)  # model output shape
     # metadata = {'stride': int(max(model.stride)), 'names': model.names}  # model metadata
