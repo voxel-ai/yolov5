@@ -58,6 +58,7 @@ from pathlib import Path
 import pandas as pd
 import torch
 from torch.utils.mobile_optimizer import optimize_for_mobile
+import torch.nn as nn
 
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLOv5 root directory
@@ -163,7 +164,7 @@ def export_onnx(model, im, file, opset, dynamic, simplify, prefix=colorstr('ONNX
         onnx.checker.check_model(model_onnx)  # check onnx model
 
         # Metadata
-        d = {'stride': int(max(model.stride)), 'names': model.names}
+        d = {'stride': int(max(model.backbone_detector.stride)), 'names': model.backbone_detector.names}
         for k, v in d.items():
             meta = model_onnx.metadata_props.add()
             meta.key, meta.value = k, str(v)
@@ -270,6 +271,7 @@ def export_engine(model, im, file, half, dynamic, simplify, workspace=4, verbose
     builder = trt.Builder(logger)
     config = builder.create_builder_config()
     config.max_workspace_size = workspace * 1 << 30
+    config.set_flag(trt.BuilderFlag.FP16)
     # config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace << 30)  # fix TRT 8.4 deprecation notice
 
     flag = (1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
@@ -454,6 +456,38 @@ def export_tfjs(file, prefix=colorstr('TensorFlow.js:')):
         j.write(subst)
     return f, None
 
+"""
+This nn.Module performs tiled inference using the Yolo model.
+The tiling is currently fixed at 3 x 2.
+For simplicity, the module assumes only one input frame (batch size = 1).
+It then performs tiled inference by stacking the tiles into a tesnor with batchsize = 3 * 2 = 6.
+Accordingly, this module should be exported with a max batch-size of 1.
+The module returns:
+- a 6 x N x 6 tensor representing the tile-wise detected bounding boxes and their confidences.
+- a 6 x 2 tensor representing the [x_shift, y_shift] for each tile. This is needed to adjust the bounding boxes to the full-frame coordinates.
+"""
+class TiledInferenceWrapper(nn.Module):
+    
+    def __init__(self, backbone_detector) -> None:
+        super(TiledInferenceWrapper, self).__init__()
+        self.backbone_detector = backbone_detector
+
+    def forward(self, frame):
+        shifts = []
+        shifts.append([0, 0])
+        cx = int((frame.shape[3] - 640) / 2)
+        shifts.append([cx, 0])
+        shifts.append([frame.shape[3] - 640, 0])
+        shifts.append([0, frame.shape[2] - 480])
+        shifts.append([cx, frame.shape[2] - 480])
+        shifts.append([frame.shape[3] - 640, frame.shape[2] - 480])
+
+        tiles = []
+        for sh in shifts:
+            tiles.append(frame[:, :, sh[1]:sh[1] + 480, sh[0]:sh[0] + 640])
+        inp = torch.cat(tiles)
+        outp_tiles = self.backbone_detector(inp)
+        return outp_tiles[0], torch.tensor(shifts, dtype = torch.float32)
 
 @smart_inference_mode()
 def run(
@@ -495,13 +529,15 @@ def run(
         assert not dynamic, '--half not compatible with --dynamic, i.e. use either --half or --dynamic but not both'
     model = attempt_load(weights, device=device, inplace=True, fuse=True)  # load FP32 model
 
+    model = TiledInferenceWrapper(model)
+
     # Checks
     imgsz *= 2 if len(imgsz) == 1 else 1  # expand
     if optimize:
         assert device.type == 'cpu', '--optimize not compatible with cuda devices, i.e. use --device cpu'
 
     # Input
-    gs = int(max(model.stride))  # grid size (max stride)
+    gs = int(max(model.backbone_detector.stride))  # grid size (max stride)
     imgsz = [check_img_size(x, gs) for x in imgsz]  # verify img_size are gs-multiples
     im = torch.zeros(batch_size, 3, *imgsz).to(device)  # image size(1,3,320,192) BCHW iDetection
 
@@ -518,7 +554,7 @@ def run(
     if half and not coreml:
         im, model = im.half(), model.half()  # to FP16
     shape = tuple((y[0] if isinstance(y, tuple) else y).shape)  # model output shape
-    metadata = {'stride': int(max(model.stride)), 'names': model.names}  # model metadata
+    metadata = {'stride': int(max(model.backbone_detector.stride)), 'names': model.backbone_detector.names}  # model metadata
     LOGGER.info(f"\n{colorstr('PyTorch:')} starting from {file} with output shape {shape} ({file_size(file):.1f} MB)")
 
     # Exports
