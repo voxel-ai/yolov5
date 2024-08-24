@@ -30,7 +30,10 @@ WORKDIR /usr/src/app
 
 # Copy contents
 # COPY . /usr/src/app  (issues as not a .git directory)
-RUN git clone https://github.com/voxel-ai/yolov5 /usr/src/app
+RUN git clone --depth=1 https://github.com/voxel-ai/yolov5 /usr/src/app
+
+ENV NVIDIA_VISIBLE_DEVICES="all" \
+    NVIDIA_DRIVER_CAPABILITIES="compute,utility"
 
 ENTRYPOINT "/bin/bash"
 
